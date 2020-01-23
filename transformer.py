@@ -1,9 +1,13 @@
-import logging
-import os
-import json
-import numpy as np
+"""Transforms FLIR camera output to TIF file format"""
 
-from terrautils.spatial import scanalyzer_to_utm, geojson_to_tuples
+import logging
+import json
+import os
+import math
+import numpy as np
+from numpy.matlib import repmat
+
+from terrautils.spatial import geojson_to_tuples
 from terrautils.formats import create_geotiff
 import configuration
 try:
@@ -12,8 +16,15 @@ except ImportError:
     pass
 
 
-class calibParam:
+class CalibParam:
+    """Class for holding calibration information
+    """
+    # Disabling these checks to maintain readable code
+    # pylint: disable=invalid-name, too-many-instance-attributes, too-few-public-methods
     def __init__(self):
+        """Initializes class instance
+        """
+        # pylint: disable=invalid-name
         self.calibrated = True
         self.calibrationR = 0.0
         self.calibrationB = 0.0
@@ -27,46 +38,58 @@ class calibParam:
         self.calibrationb2 = 0.0
 
 
-def get_calibrate_param(metadata):
-    calibparameter = calibParam()
+def get_calibrate_param(metadata: dict) -> CalibParam:
+    """Returns an instance of the calibration class populated with data from the metadata
+    Arguments:
+        metadata: the metadata to find calibration information in
+    """
+    calib_param = CalibParam()
 
     try:
         if 'terraref_cleaned_metadata' in metadata:
             fixedmd = metadata['sensor_fixed_metadata']
             if fixedmd['is_calibrated'] == 'True':
-                return calibparameter
-            else:
-                calibparameter.calibrated = False
-                calibparameter.calibrationR = float(fixedmd['calibration_R'])
-                calibparameter.calibrationB = float(fixedmd['calibration_B'])
-                calibparameter.calibrationF = float(fixedmd['calibration_F'])
-                calibparameter.calibrationJ1 = float(fixedmd['calibration_J1'])
-                calibparameter.calibrationJ0 = float(fixedmd['calibration_J0'])
-                calibparameter.calibrationa1 = float(fixedmd['calibration_alpha1'])
-                calibparameter.calibrationa2 = float(fixedmd['calibration_alpha2'])
-                calibparameter.calibrationX = float(fixedmd['calibration_X'])
-                calibparameter.calibrationb1 = float(fixedmd['calibration_beta1'])
-                calibparameter.calibrationb2 = float(fixedmd['calibration_beta2'])
-                return calibparameter
+                return calib_param
 
-    except KeyError as err:
-        return calibparameter
+            calib_param.calibrated = False
+            calib_param.calibrationR = float(fixedmd['calibration_R'])
+            calib_param.calibrationB = float(fixedmd['calibration_B'])
+            calib_param.calibrationF = float(fixedmd['calibration_F'])
+            calib_param.calibrationJ1 = float(fixedmd['calibration_J1'])
+            calib_param.calibrationJ0 = float(fixedmd['calibration_J0'])
+            calib_param.calibrationa1 = float(fixedmd['calibration_alpha1'])
+            calib_param.calibrationa2 = float(fixedmd['calibration_alpha2'])
+            calib_param.calibrationX = float(fixedmd['calibration_X'])
+            calib_param.calibrationb1 = float(fixedmd['calibration_beta1'])
+            calib_param.calibrationb2 = float(fixedmd['calibration_beta2'])
+
+    except KeyError:
+        pass
+
+    return calib_param
 
 
-# convert flir raw data into temperature C degree, for date after September 15th
-def flirRawToTemperature(rawData, calibP):
+def flir_raw_to_temperature(raw_data: np.ndarray, calib_params: CalibParam) -> np.ndarray:
+    """Convert flir raw data into temperature C degree, for date after September 15th
+    Arguments:
+        raw_data: the raw data to convert using the calibration parameters
+        calib_params: the calibration values to use when converting the data
+    Return:
+        Returns the calibrated data
+    """
+    # Disabling to maintain readability
+    # pylint: disable=too-many-locals, invalid-name
+    R = calib_params.calibrationR
+    B = calib_params.calibrationB
+    F = calib_params.calibrationF
+    J0 = calib_params.calibrationJ0
+    J1 = calib_params.calibrationJ1
 
-    R = calibP.calibrationR
-    B = calibP.calibrationB
-    F = calibP.calibrationF
-    J0 = calibP.calibrationJ0
-    J1 = calibP.calibrationJ1
-
-    X = calibP.calibrationX
-    a1 = calibP.calibrationa1
-    b1 = calibP.calibrationb1
-    a2 = calibP.calibrationa2
-    b2 = calibP.calibrationb2
+    X = calib_params.calibrationX
+    a1 = calib_params.calibrationa1
+    b1 = calib_params.calibrationb1
+    a2 = calib_params.calibrationa2
+    b2 = calib_params.calibrationb2
 
     H2O_K1 = 1.56
     H2O_K2 = 0.0694
@@ -80,7 +103,7 @@ def flirRawToTemperature(rawData, calibP):
 
     K0 = 273.15
 
-    im = rawData
+    im = raw_data
 
     AmbTemp = T + K0
     AtmTemp = T + K0
@@ -108,22 +131,29 @@ def flirRawToTemperature(rawData, calibP):
     return pxl_temp
 
 
-def rawData_to_temperature(rawData, metadata):
+def raw_data_to_temperature(raw_data: np.ndarray, metadata: dict) -> np.ndarray:
+    """Converts raw data to temperature data by applying calibration
+    Arguments:
+        raw_data: the raw data to calibrate
+        metadata: the metadata containing the calibration values
+    Return:
+        Returns the calibrated data
+    """
     try:
-        calibP = get_calibrate_param(metadata)
-        tc = np.zeros((640, 480))
+        calib_params = get_calibrate_param(metadata)
 
-        if calibP.calibrated:
-            tc = rawData/10
+        if calib_params.calibrated:
+            temp_calib = raw_data/10
         else:
-            tc = flirRawToTemperature(rawData, calibP)
+            temp_calib = flir_raw_to_temperature(raw_data, calib_params)
 
-        return tc
+        return temp_calib
     except Exception as ex:
-        fail('raw to temperature fail:' + str(ex))
+        logging.exception('Raw to temperature exception')
+        raise ex
 
 
-def flir2tif(input_paths, full_md = None):
+def flir2tif(input_paths: list, full_md: dict = None) -> dict:
     # Determine metadata and BIN file
     bin_file = None
     for f in input_paths:
@@ -142,7 +172,7 @@ def flir2tif(input_paths, full_md = None):
             gps_bounds_bin = geojson_to_tuples(full_md['spatial_metadata']['flirIrCamera']['bounding_box'])
             raw_data = np.fromfile(bin_file, np.dtype('<u2')).reshape([480, 640]).astype('float')
             raw_data = np.rot90(raw_data, 3)
-            tc = rawData_to_temperature(raw_data, full_md)
+            tc = raw_data_to_temperature(raw_data, full_md)
             create_geotiff(tc, gps_bounds_bin, out_file, None, False, extractor_info, full_md, compress=True)
 
     # Return formatted dict for simple extractor
@@ -154,19 +184,7 @@ def flir2tif(input_paths, full_md = None):
     }
 
 
-def check_continue(transformer, check_md: dict, transformer_md: dict, full_md: dict, **kwargs) -> dict:
-    """Checks if conditions are right for continuing processing
-    Arguments:
-        transformer: instance of transformer class
-    Return:
-        Returns a dictionary containining the return code for continuing or not, and
-        an error message if there's an error
-    """
-    print("check_continue(): received arguments: %s" % str(kwargs))
-    return (0)
-
-
-def perform_process(transformer, check_md: dict, transformer_md: dict, full_md: dict) -> dict:
+def perform_process(transformer: transformer_class.Transformer, check_md: dict, transformer_md: list, full_md: list) -> dict:
     """Performs the processing of the data
     Arguments:
         transformer: instance of transformer class
@@ -176,27 +194,43 @@ def perform_process(transformer, check_md: dict, transformer_md: dict, full_md: 
     result = {}
     file_md = []
 
-    file_list = os.listdir(check_md['working_folder'])
+    file_list = check_md['list_files']()
+
+    # Find the metadata we're interested in for calibration parameters
+    terra_md = None
+    for one_md in full_md:
+        if 'terraref_cleaned_metadata' in one_md:
+            terra_md = one_md
+            break
+    if not terra_md:
+        raise RuntimeError("Unable to find TERRA REF specific metadata")
+
+    transformer_md = transformer.generate_transformer_md()
 
     try:
-        bin_files = []
         for one_file in file_list:
             if one_file.endswith(".bin"):
-                bin_files.append(os.path.join(check_md['working_folder'], one_file))
-        if len(bin_files) > 0:
-            output = flir2tif(bin_files, full_md)
-            file_md.append({
-                'path': output['output'],
-                'key': configuration.TRANSFORMER_SENSOR,
-                'metadata': {
-                    'data': transformer_md
-                }
-            })
+                output_filename = os.path.join(check_md['working_folder'], os.path.basename(one_file.replace('.bin', '.tif')))
+                gps_bounds_bin = geojson_to_tuples(terra_md['spatial_metadata']['flirIrCamera']['bounding_box'])
+                raw_data = np.fromfile(one_file, np.dtype('<u2')).reshape([480, 640]).astype('float')
+                raw_data = np.rot90(raw_data, 3)
+                temp_calib = raw_data_to_temperature(raw_data, terra_md)
+                create_geotiff(temp_calib, gps_bounds_bin, output_filename, None, False, transformer_md, terra_md, compress=True)
+
+                cur_md = {'path': output_filename,
+                          'key': configuration.TRANSFORMER_SENSOR,
+                          'metadata': {
+                              'data': transformer_md
+                          }}
+                file_md.append(cur_md)
+
         result['code'] = 0
         result['file'] = file_md
 
     except Exception as ex:
+        msg = 'Exception caught converting FLIR files'
+        logging.exception(msg)
         result['code'] = -1
-        result['error'] = "Exception caught converting PLY files: %s" % str(ex)
+        result['error'] = msg + ': ' + str(ex)
 
     return result
