@@ -12,7 +12,7 @@ Below is a sample command line that shows how the flir2tif Docker image could be
 An explanation of the command line options used follows.
 Be sure to read up on the [docker run](https://docs.docker.com/engine/reference/run/) command line for more information.
 
-The data files used in this example are available on [Google Drive]().
+The data files used in this example are available on [Google Drive](https://drive.google.com/file/d/1AZT2S3yajitMCanIaQvnFra1XIbwYc5d/view?usp=sharing).
 
 ```docker run --rm --mount "src=/home/test,target=/mnt,type=bind" agpipeline/flir2tif:2.1 --metadata "/mnt/e475911c-3f79-4ebb-807f-f623d5ae7783_metadata_cleaned.json" --working_space "/mnt" "/mnt/e475911c-3f79-4ebb-807f-f623d5ae7783_ir.bin"```
 
