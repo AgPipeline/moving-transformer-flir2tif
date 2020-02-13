@@ -1,20 +1,20 @@
 """Transforms FLIR camera output to TIF file format"""
 
-import logging
+import argparse
 import json
+import logging
 import os
 import math
 import numpy as np
 from numpy.matlib import repmat
 
 from terrautils.spatial import geojson_to_tuples
-from terrautils.formats import create_geotiff
+from terrautils.formats import create_geotiff, create_image
 import configuration
 try:
     import transformer_class
 except ImportError:
     pass
-
 
 class CalibParam:
     """Class for holding calibration information
@@ -141,6 +141,7 @@ def raw_data_to_temperature(raw_data: np.ndarray, metadata: dict) -> np.ndarray:
     """
     try:
         calib_params = get_calibrate_param(metadata)
+        temp_calib = np.zeros((640, 480))
 
         if calib_params.calibrated:
             temp_calib = raw_data/10
@@ -173,7 +174,7 @@ def flir2tif(input_paths: list, full_md: dict = None) -> dict:
             raw_data = np.fromfile(bin_file, np.dtype('<u2')).reshape([480, 640]).astype('float')
             raw_data = np.rot90(raw_data, 3)
             tc = raw_data_to_temperature(raw_data, full_md)
-            create_geotiff(tc, gps_bounds_bin, out_file, None, False, extractor_info, full_md, compress=True)
+            create_geotiff(tc, gps_bounds_bin, out_file, None, True, extractor_info, full_md)
 
     # Return formatted dict for simple extractor
     return {
@@ -182,6 +183,15 @@ def flir2tif(input_paths: list, full_md: dict = None) -> dict:
         },
         "outputs": [out_file]
     }
+
+
+def add_parameters(parser: argparse.ArgumentParser) -> None:
+    """Adds parameters
+    Arguments:
+        parser: instance of argparse
+    """
+    parser.add_argument('--scale', dest="scale_values", type=bool, nargs='?', default=True,
+                        help="scale individual flir images based on px range as opposed to full field stitch")
 
 
 def perform_process(transformer: transformer_class.Transformer, check_md: dict, transformer_md: list, full_md: list) -> dict:
@@ -211,16 +221,35 @@ def perform_process(transformer: transformer_class.Transformer, check_md: dict, 
         for one_file in file_list:
             if one_file.endswith(".bin"):
                 output_filename = os.path.join(check_md['working_folder'], os.path.basename(one_file.replace('.bin', '.tif')))
+                logging.info("Creating: '%s'", output_filename)
                 gps_bounds_bin = geojson_to_tuples(terra_md['spatial_metadata']['flirIrCamera']['bounding_box'])
                 raw_data = np.fromfile(one_file, np.dtype('<u2')).reshape([480, 640]).astype('float')
                 raw_data = np.rot90(raw_data, 3)
                 temp_calib = raw_data_to_temperature(raw_data, terra_md)
-                create_geotiff(temp_calib, gps_bounds_bin, output_filename, None, False, transformer_md, terra_md, compress=True)
+                create_geotiff(temp_calib, gps_bounds_bin, output_filename, None, True, transformer_md, terra_md)
 
                 cur_md = {'path': output_filename,
                           'key': configuration.TRANSFORMER_SENSOR,
                           'metadata': {
                               'data': transformer_md
+                          }}
+                file_md.append(cur_md)
+
+                png_filename = os.path.join(check_md['working_folder'], os.path.basename(one_file.replace('.bin', '.png')))
+                logging.info("Creating: '%s'", png_filename)
+                raw_data = np.fromfile(one_file, np.dtype('<u2')).reshape([480, 640]).astype('float')
+                raw_data = np.rot90(raw_data, 3)
+                create_image(raw_data, png_filename, transformer.args.scale_values)
+
+                cur_md = {'path': png_filename,
+                          'key': configuration.TRANSFORMER_SENSOR,
+                          'metadata': {
+                              'data': {
+                                  'version': configuration.TRANSFORMER_VERSION,
+                                  'name': configuration.TRANSFORMER_NAME,
+                                  'author': configuration.AUTHOR_NAME,
+                                  'description': 'Thermal temperature (K) PNG'
+                              }
                           }}
                 file_md.append(cur_md)
 
